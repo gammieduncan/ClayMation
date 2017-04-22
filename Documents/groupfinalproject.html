@@ -1,0 +1,87 @@
+<!DOCTYPE html "-//W3C//DTD XHTML 1.0 Strict//EN"
+  "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+
+<html xmlns="http://www.w3.org/1999/xhtml">
+
+  <head>
+    <meta http-equiv="content-type" content="text/html; charset=utf-8"/>
+    <title>Google Books Embedded Viewer API Example</title>
+
+
+ <!--    <script type="text/javascript" src="http://code.jquery.com/jquery-1.7.1.min.js"></script>
+  	 <script type ="text/javascript" src = "http://www.turnjs.com/lib/turn.min.js?utm_source=jquer.in&utm_medium=website&utm_campaign=content-curation"</script> -->
+    <script type="text/javascript" src="https://www.google.com/books/jsapi.js"></script>
+    <script type="text/javascript">
+
+      google.books.load();
+
+      function initialize() {
+        var viewer = new google.books.DefaultViewer(document.getElementById('viewerCanvas'));
+        viewer.load('ISBN:0738531367');
+      }
+
+      google.books.setOnLoadCallback(initialize);
+
+      </script>
+
+    <style type = "text/css">
+    	
+    	body
+    	{
+    		background: #9988AA;
+    	}
+
+    	#book
+    	{
+    		width: 1152px;
+    		height: 400px;
+    	}
+
+    	#book .turn-page {
+    		background-color: #DDD;
+    		background-size:100% 100%;
+    	}
+    </style>
+
+  </head>
+
+  <body>
+  	
+  	<div id ="book">
+    	<div id="viewerCanvas" style="width: 600px; height: 500px"></div>
+    	<div id = "idkSample">oook</div>
+    </div>
+
+ <!--  </body> -->
+</body>
+  
+     <script type="text/javascript" src="http://code.jquery.com/jquery-1.7.1.min.js"></script>
+  	<script type ="text/javascript" src = "turn.min.js"></script>
+    <script type = "text/javascript">
+    console.log("hum");
+
+  	$(window).ready(function() {
+  		console.log("anything?");
+  		$('#book').turn({
+  			display: 'double',
+  			acceleration: true,
+  			elevation:50
+  		});
+  	});
+ 
+
+  	$(window).bind('keydown', function(e) {
+  		if(e.keyCode == 37) 
+  			{
+  				console.log("hello");
+  				$('#book').turn('previous');
+  			}
+  		else if(e.keyCode == 39) $('#book').turn('next');
+  	});
+
+    </script>
+
+
+
+</html>
+
