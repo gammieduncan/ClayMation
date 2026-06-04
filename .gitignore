@@ -1,15 +1,24 @@
-# Gradle
-.gradle/
-build/
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
 
-# Runtime artifacts
-currMov.mp4
+node_modules
+dist
+dist-ssr
+*.local
 
-# Eclipse
-bin/
-.classpath
-.project
-.settings/
-
-# macOS
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
 .DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
