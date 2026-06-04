@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useWebcam } from '../hooks/useWebcam'
 import { canExportAudio, canExportMp4, exportMp4 } from '../lib/exportMp4'
 import type { Frame } from '../types'
+import { AudioTrack } from './AudioTrack'
 import { Filmstrip } from './Filmstrip'
 
 type Mode = 'live' | 'preview' | 'play'
@@ -25,13 +26,21 @@ export function Studio() {
   const [dims, setDims] = useState<Dims>({ w: 1280, h: 720 })
   const [isExporting, setIsExporting] = useState(false)
   const [exportPct, setExportPct] = useState(0)
-  const [audio, setAudio] = useState<{ name: string; buffer: AudioBuffer } | null>(null)
+  const [audio, setAudio] = useState<{ name: string; buffer: AudioBuffer; source: 'import' | 'record' } | null>(null)
+  const [audioMenuOpen, setAudioMenuOpen] = useState(false)
+  const [isRecording, setIsRecording] = useState(false)
+  const [recordSeconds, setRecordSeconds] = useState(0)
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const audioInputRef = useRef<HTMLInputElement>(null)
   const audioCtxRef = useRef<AudioContext | null>(null)
   const audioSourceRef = useRef<AudioBufferSourceNode | null>(null)
+  const audioMenuRef = useRef<HTMLDivElement>(null)
+  const recorderRef = useRef<MediaRecorder | null>(null)
+  const recordChunksRef = useRef<Blob[]>([])
+  const recordStreamRef = useRef<MediaStream | null>(null)
+  const recordTimerRef = useRef<number | null>(null)
   const playRef = useRef({ index: 0, last: 0 })
 
   // Mirror reactive state into a ref so the rAF loop always reads fresh values.
@@ -134,7 +143,7 @@ export function Studio() {
     try {
       const ctx = (audioCtxRef.current ??= new AudioContext())
       const buffer = await ctx.decodeAudioData(await file.arrayBuffer())
-      setAudio({ name: file.name, buffer })
+      setAudio({ name: file.name, buffer, source: 'import' })
     } catch {
       alert('Could not read that audio file. Try an MP3, WAV, or M4A.')
     }
@@ -144,6 +153,60 @@ export function Studio() {
     stopAudio()
     setAudio(null)
   }
+
+  async function startRecording() {
+    setAudioMenuOpen(false)
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      recordStreamRef.current = stream
+      recordChunksRef.current = []
+      const recorder = new MediaRecorder(stream)
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) recordChunksRef.current.push(e.data)
+      }
+      recorder.onstop = async () => {
+        recordStreamRef.current?.getTracks().forEach((t) => t.stop())
+        recordStreamRef.current = null
+        const blob = new Blob(recordChunksRef.current, { type: recorder.mimeType })
+        try {
+          const ctx = (audioCtxRef.current ??= new AudioContext())
+          const buffer = await ctx.decodeAudioData(await blob.arrayBuffer())
+          setAudio({ name: 'Recording', buffer, source: 'record' })
+        } catch {
+          alert('Could not decode the recording.')
+        }
+      }
+      recorder.start()
+      recorderRef.current = recorder
+      setIsRecording(true)
+      setRecordSeconds(0)
+      recordTimerRef.current = window.setInterval(() => setRecordSeconds((s) => s + 1), 1000)
+    } catch {
+      alert('Could not access the microphone. Grant permission and try again.')
+    }
+  }
+
+  function stopRecording() {
+    recorderRef.current?.stop()
+    recorderRef.current = null
+    setIsRecording(false)
+    if (recordTimerRef.current !== null) {
+      clearInterval(recordTimerRef.current)
+      recordTimerRef.current = null
+    }
+  }
+
+  // Close the audio menu when clicking outside it.
+  useEffect(() => {
+    if (!audioMenuOpen) return
+    const onDown = (e: MouseEvent) => {
+      if (audioMenuRef.current && !audioMenuRef.current.contains(e.target as Node)) {
+        setAudioMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [audioMenuOpen])
 
   function handleLoadedMetadata() {
     const v = videoRef.current
@@ -357,28 +420,43 @@ export function Studio() {
             />
           )}
 
-          {audio ? (
-            <div className="flex items-center gap-2 rounded-xl border border-white/15 bg-white/5 px-3 py-2 text-sm">
-              <span className="text-white/40">♪</span>
-              <span className="max-w-[140px] truncate text-white/80" title={audio.name}>
-                {audio.name}
-              </span>
-              <button
-                onClick={removeAudio}
-                className="text-white/40 hover:text-red-400"
-                aria-label="Remove music"
-              >
-                ×
-              </button>
-            </div>
-          ) : (
+          {isRecording ? (
             <button
-              onClick={() => audioInputRef.current?.click()}
-              className="rounded-xl border border-white/15 bg-white/5 px-4 py-2.5 font-medium text-white/70 transition hover:bg-white/10"
-              title="Add a music track to play during preview and bake into the export"
+              onClick={stopRecording}
+              className="flex items-center gap-2 rounded-xl border border-red-500/50 bg-red-500/15 px-4 py-2.5 font-medium text-red-300 transition hover:bg-red-500/25"
             >
-              ♪ Add music
+              <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-red-500" />
+              Stop · {Math.floor(recordSeconds / 60)}:{String(recordSeconds % 60).padStart(2, '0')}
             </button>
+          ) : (
+            <div className="relative" ref={audioMenuRef}>
+              <button
+                onClick={() => setAudioMenuOpen((o) => !o)}
+                className="rounded-xl border border-white/15 bg-white/5 px-4 py-2.5 font-medium text-white/70 transition hover:bg-white/10"
+                title="Add audio to play during preview and bake into the export"
+              >
+                ♪ Audio ▾
+              </button>
+              {audioMenuOpen && (
+                <div className="absolute bottom-full left-0 z-20 mb-2 w-44 overflow-hidden rounded-xl border border-white/15 bg-neutral-900 shadow-xl">
+                  <button
+                    onClick={() => {
+                      setAudioMenuOpen(false)
+                      audioInputRef.current?.click()
+                    }}
+                    className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm hover:bg-white/10"
+                  >
+                    ⤓ Import file…
+                  </button>
+                  <button
+                    onClick={startRecording}
+                    className="flex w-full items-center gap-2 border-t border-white/10 px-4 py-2.5 text-left text-sm hover:bg-white/10"
+                  >
+                    <span className="h-2.5 w-2.5 rounded-full bg-red-500" /> Record
+                  </button>
+                </div>
+              )}
+            </div>
           )}
 
           <div className="mx-1 h-6 w-px bg-white/10" />
@@ -409,6 +487,15 @@ export function Studio() {
         onDelete={deleteFrame}
         onReorder={reorderFrames}
       />
+
+      {audio && (
+        <AudioTrack
+          buffer={audio.buffer}
+          name={audio.name}
+          source={audio.source}
+          onRemove={removeAudio}
+        />
+      )}
 
       <input
         ref={audioInputRef}
