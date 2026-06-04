@@ -280,6 +280,27 @@ export function Studio() {
     setSelectedClipId(null)
   }
 
+  function moveClip(id: string, newStart: number) {
+    setAudio((a) =>
+      a ? { ...a, clips: a.clips.map((c) => (c.id === id ? { ...c, timelineStart: newStart } : c)) } : a,
+    )
+  }
+
+  // Delete/Backspace removes the selected audio clip (unless typing in a field).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const el = document.activeElement
+      if (el && ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName)) return
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedClipId) {
+        e.preventDefault()
+        deleteSelectedClip()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedClipId])
+
   // Close the audio menu when clicking outside it.
   useEffect(() => {
     if (!audioMenuOpen) return
@@ -402,7 +423,7 @@ export function Studio() {
   const exportSupported = canExportMp4()
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full flex-col overflow-hidden">
       {/* Header */}
       <header className="flex items-center justify-between border-b border-white/10 px-5 py-3">
         <div className="flex items-center gap-3">
@@ -430,7 +451,7 @@ export function Studio() {
       </header>
 
       {/* Stage */}
-      <main className="flex flex-1 flex-col items-center justify-center gap-5 p-6">
+      <main className="flex min-h-0 flex-1 flex-col items-center justify-center gap-5 overflow-auto p-6">
         {error ? (
           <div className="max-w-md rounded-xl border border-red-500/30 bg-red-500/10 p-6 text-center">
             <div className="mb-1 font-semibold text-red-300">Camera unavailable</div>
@@ -583,6 +604,7 @@ export function Studio() {
         onDeleteFrame={deleteFrame}
         onReorderFrames={reorderFrames}
         onSelectClip={setSelectedClipId}
+        onMoveClip={moveClip}
         onSplit={splitAudioAtPlayhead}
         onDeleteClip={deleteSelectedClip}
         onRemoveAudio={removeAudio}

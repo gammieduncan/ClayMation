@@ -30,6 +30,7 @@ interface Props {
   onDeleteFrame: (index: number) => void
   onReorderFrames: (from: number, to: number) => void
   onSelectClip: (id: string | null) => void
+  onMoveClip: (id: string, timelineStart: number) => void
   onSplit: () => void
   onDeleteClip: () => void
   onRemoveAudio: () => void
@@ -57,12 +58,14 @@ export function Timeline({
   onDeleteFrame,
   onReorderFrames,
   onSelectClip,
+  onMoveClip,
   onSplit,
   onDeleteClip,
   onRemoveAudio,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const dragIndex = useRef<number | null>(null)
+  const scrubbing = useRef(false)
 
   const framesDuration = frames.length / fps
   const audioEnd = audio ? audioTimelineEnd(audio.clips) : 0
@@ -85,7 +88,7 @@ export function Timeline({
   for (let t = 0; t <= totalDuration + 1e-6; t += interval) ticks.push(t)
 
   return (
-    <div className="border-t border-white/10 bg-neutral-950/60">
+    <div className="shrink-0 border-t border-white/10 bg-neutral-950/60">
       {/* Controls bar */}
       <div className="flex items-center gap-3 px-3 py-2">
         <span className="text-xs text-white/40">Zoom</span>
@@ -167,9 +170,20 @@ export function Timeline({
           <div className="relative" style={{ width: contentWidth, height: TOTAL_H }}>
             {/* Ruler */}
             <div
-              className="absolute left-0 top-0 cursor-text border-b border-white/10 bg-neutral-900/40"
+              className="absolute left-0 top-0 cursor-ew-resize select-none border-b border-white/10 bg-neutral-900/40"
               style={{ width: contentWidth, height: RULER_H }}
-              onMouseDown={(e) => onScrub(timeFromEvent(e))}
+              onPointerDown={(e) => {
+                e.currentTarget.setPointerCapture(e.pointerId)
+                scrubbing.current = true
+                onScrub(timeFromEvent(e))
+              }}
+              onPointerMove={(e) => {
+                if (scrubbing.current) onScrub(timeFromEvent(e))
+              }}
+              onPointerUp={(e) => {
+                scrubbing.current = false
+                e.currentTarget.releasePointerCapture(e.pointerId)
+              }}
             >
               {ticks.map((t, i) => (
                 <div key={i} className="absolute top-0" style={{ left: t * pxPerSecond }}>
@@ -254,6 +268,7 @@ export function Timeline({
                   height={AUDIO_LANE_H}
                   selected={c.id === selectedClipId}
                   onSelect={() => onSelectClip(c.id)}
+                  onMove={(start) => onMoveClip(c.id, start)}
                 />
               ))}
             </div>
@@ -280,10 +295,12 @@ interface ClipBlockProps {
   height: number
   selected: boolean
   onSelect: () => void
+  onMove: (timelineStart: number) => void
 }
 
-function ClipBlock({ clip, buffer, pxPerSecond, height, selected, onSelect }: ClipBlockProps) {
+function ClipBlock({ clip, buffer, pxPerSecond, height, selected, onSelect, onMove }: ClipBlockProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const drag = useRef<{ startX: number; origStart: number } | null>(null)
   const width = Math.max(2, clip.duration * pxPerSecond)
 
   useEffect(() => {
@@ -324,13 +341,24 @@ function ClipBlock({ clip, buffer, pxPerSecond, height, selected, onSelect }: Cl
 
   return (
     <div
-      className={`absolute top-1 cursor-pointer overflow-hidden rounded-md ${
+      className={`absolute top-1 cursor-grab touch-none overflow-hidden rounded-md active:cursor-grabbing ${
         selected ? 'ring-2 ring-amber-300' : 'ring-1 ring-white/15'
       }`}
       style={{ left: clip.timelineStart * pxPerSecond, width, height: height - 8 }}
-      onMouseDown={(e) => {
+      onPointerDown={(e) => {
         e.stopPropagation()
         onSelect()
+        e.currentTarget.setPointerCapture(e.pointerId)
+        drag.current = { startX: e.clientX, origStart: clip.timelineStart }
+      }}
+      onPointerMove={(e) => {
+        if (!drag.current) return
+        const dt = (e.clientX - drag.current.startX) / pxPerSecond
+        onMove(Math.max(0, drag.current.origStart + dt))
+      }}
+      onPointerUp={(e) => {
+        drag.current = null
+        e.currentTarget.releasePointerCapture(e.pointerId)
       }}
       title={`${formatTime(clip.timelineStart)} – ${formatTime(clipEnd(clip))}`}
     >
