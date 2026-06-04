@@ -66,7 +66,7 @@ public class webcamPanel extends JPanel implements WebcamDiscoveryListener
 		 * WebcamPanel
 		 */
 	
-		layers.add(panel, new Integer(0));
+		layers.add(panel, Integer.valueOf(0));
 		//layers.setLayer(panel, new Integer(1)); 
 		add(layers);
 

@@ -27,11 +27,9 @@ import javax.swing.JLabel;
 import javax.swing.JLayeredPane;
 import javax.swing.JTextField;
 
-import com.xuggle.mediatool.ToolFactory;
-import com.xuggle.mediatool.IMediaWriter;
-import com.xuggle.xuggler.ICodec;
-import com.xuggle.mediatool.IMediaViewer;
-import com.xuggle.mediatool.IMediaReader;
+import java.awt.Desktop;
+
+import org.jcodec.api.awt.AWTSequenceEncoder;
 
 
 public class controlPanel extends JPanel 
@@ -43,8 +41,6 @@ public class controlPanel extends JPanel
 	private JTextField input;
 	private picturesPanel pix;
 	private ArrayList<BufferedImage> currImages;
-	private IMediaWriter writer;
-	private Dimension screenBounds;
 	private int hours = 00, minutes = 00, seconds = 00;
 	private JLayeredPane layers;
 	private onionSkinManager onions;
@@ -150,21 +146,18 @@ public class controlPanel extends JPanel
 		 */
 	}
 	
-	/*plays the currentMovie onscreen*/
+	/*plays the currentMovie by handing it to the OS default video player*/
 	public void playIt()
 	{
-		IMediaReader reader = ToolFactory.makeReader(currentMovie.getName());
-		reader.addListener(ToolFactory.makeViewer(IMediaViewer.Mode.VIDEO_ONLY)); //plays video only
-		
-		reader.open();
-		
-		//reads media file, we watch
-		while(reader.readPacket() == null)
+		try
 		{
-			//do {} while(false);
-		} 
-		
-		reader.close();
+			if(Desktop.isDesktopSupported() && currentMovie != null && currentMovie.exists())
+				Desktop.getDesktop().open(currentMovie);
+		}
+		catch(IOException e)
+		{
+			e.printStackTrace();
+		}
 	}
 	
 	/*updates the clock based on how many pictures have been taken & framerate*/
@@ -200,35 +193,28 @@ public class controlPanel extends JPanel
 		}
 	}
 	
-	/*creates and saves a movie file from the sequence of images*/
+	/*creates and saves an MP4 from the sequence of images, using JCodec (pure Java)*/
 	public void createMovie(File filename)
 	{
-		//I add one extra second to runtime to account for possibility of a rounded-down result 
-		int secondsToRun = (1/fps)*currImages.size() + 1;  
-		writer = ToolFactory.makeWriter(filename.getAbsolutePath()); 
-		screenBounds = web.getWebcamDimensions(); //gets the dimensions of webcam view
-		
-		writer.addVideoStream(0, 0, ICodec.ID.CODEC_ID_MPEG4, screenBounds.width/2, screenBounds.height/2);
-		long startTime = System.nanoTime();
-		
-		for(int i = 0; i < currImages.size(); i++)
+		if(currImages.isEmpty()) return; //nothing to encode
+
+		try
 		{
-			BufferedImage bgrScreen = convertToType(currImages.get(i), BufferedImage.TYPE_3BYTE_BGR);
-			writer.encodeVideo(0, bgrScreen, System.nanoTime() - startTime, TimeUnit.NANOSECONDS);
-			
-			try
+			AWTSequenceEncoder encoder = AWTSequenceEncoder.createSequenceEncoder(filename, fps);
+
+			for(int i = 0; i < currImages.size(); i++)
 			{
-				Thread.sleep((long) (1000/fps));
-			} 
-			catch(InterruptedException e)
-			{
-				//ignore this
+				//JCodec needs RGB images with even dimensions; convertToType normalizes the type
+				BufferedImage frame = convertToType(currImages.get(i), BufferedImage.TYPE_3BYTE_BGR);
+				encoder.encodeImage(frame);
 			}
-		
-		} //end for loop
-		
-		writer.flush();
-		writer.close(); //writer closes and successfully writes the file
+
+			encoder.finish(); //writes the moov atom and closes the file
+		}
+		catch(IOException e)
+		{
+			e.printStackTrace();
+		}
 	}
 	
 	/*simply converts a BufferedImage to a specified image type (if necessary)*/

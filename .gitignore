@@ -1,0 +1,15 @@
+# Gradle
+.gradle/
+build/
+
+# Runtime artifacts
+currMov.mp4
+
+# Eclipse
+bin/
+.classpath
+.project
+.settings/
+
+# macOS
+.DS_Store

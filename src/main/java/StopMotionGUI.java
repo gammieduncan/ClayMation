@@ -192,10 +192,14 @@ public class StopMotionGUI extends JFrame
 		}
 	}
 
-	public static void main(String[] args) 
+	public static void main(String[] args)
 	{
-		StopMotionGUI win = new StopMotionGUI();
-		win.show();
+		// Use OpenPnP's capture backend (ships arm64 macOS natives) instead of the
+		// default driver, which only bundles an x86_64 lib and fails on Apple Silicon.
+		// Must be set before any webcam is touched.
+		com.github.sarxos.webcam.Webcam.setDriver(new OpenPnpDriver());
+
+		javax.swing.SwingUtilities.invokeLater(() -> new StopMotionGUI());
 	}
 
 }

@@ -59,7 +59,7 @@ public class onionSkinManager {
 		showPic.setBounds(layers.getX() + 18, layers.getY(), img2.getWidth(), img2.getHeight());
 		showPic.setOpaque(false);
 			
-		layers.add(showPic, new Integer(1));
+		layers.add(showPic, Integer.valueOf(1));
 	}
 	
 	public void addPic(BufferedImage img)

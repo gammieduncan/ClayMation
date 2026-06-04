@@ -63,7 +63,7 @@ public class picturesPanel extends JScrollPane
 	public void addToLayer(JLabel showPic, int layerNum)
 	{		
 		/*there will be one layer for all pics to display*/
-		layers.add(showPic, new Integer(layerNum));
+		layers.add(showPic, Integer.valueOf(layerNum));
 		layers.repaint();
 		layers.revalidate();
 		System.out.println(showPic.isShowing());
