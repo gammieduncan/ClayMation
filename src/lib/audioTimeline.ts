@@ -1,12 +1,20 @@
-/** A region of the source audio buffer placed at a position on the timeline. */
+/** A region of a source AudioBuffer placed at a position on the timeline. */
 export interface AudioClip {
   id: string
+  /** This clip's own source audio (one buffer per import/recording). */
+  buffer: AudioBuffer
   /** Where this clip starts on the timeline, in seconds. */
   timelineStart: number
-  /** Offset into the source AudioBuffer, in seconds. */
+  /** Offset into the source buffer, in seconds. */
   sourceStart: number
   /** Length of the clip, in seconds. */
   duration: number
+}
+
+export const MIN_CLIP_DURATION = 0.05
+
+export function makeClip(buffer: AudioBuffer, timelineStart: number): AudioClip {
+  return { id: crypto.randomUUID(), buffer, timelineStart, sourceStart: 0, duration: buffer.duration }
 }
 
 export function clipEnd(c: AudioClip): number {
@@ -27,12 +35,14 @@ export function splitClipsAtTime(clips: AudioClip[], t: number): AudioClip[] {
       const leftDur = t - c.timelineStart
       out.push({
         id: crypto.randomUUID(),
+        buffer: c.buffer,
         timelineStart: c.timelineStart,
         sourceStart: c.sourceStart,
         duration: leftDur,
       })
       out.push({
         id: crypto.randomUUID(),
+        buffer: c.buffer,
         timelineStart: t,
         sourceStart: c.sourceStart + leftDur,
         duration: c.duration - leftDur,
@@ -44,42 +54,29 @@ export function splitClipsAtTime(clips: AudioClip[], t: number): AudioClip[] {
   return out
 }
 
-/** Is `t` strictly inside some clip (i.e. a split there would actually cut)? */
-export function isSplittableAt(clips: AudioClip[], t: number): boolean {
-  const eps = 1e-4
-  return clips.some((c) => t > c.timelineStart + eps && t < clipEnd(c) - eps)
-}
-
 /**
- * Flatten the clips into a single timeline-aligned AudioBuffer (silence in gaps),
- * for export. Length is clamped to `totalDuration` seconds.
+ * Mix all clips down to a single timeline-aligned AudioBuffer using an
+ * OfflineAudioContext (handles differing sample rates and overlaps), for export.
  */
-export function renderTimelineToBuffer(
-  ctx: BaseAudioContext,
-  source: AudioBuffer,
+export async function renderTimeline(
   clips: AudioClip[],
   totalDuration: number,
-): AudioBuffer {
-  const sr = source.sampleRate
-  const channels = source.numberOfChannels
-  const length = Math.max(1, Math.ceil(totalDuration * sr))
-  const out = ctx.createBuffer(channels, length, sr)
-
-  for (let ch = 0; ch < channels; ch++) {
-    const dst = out.getChannelData(ch)
-    const src = source.getChannelData(ch)
-    for (const c of clips) {
-      const dstStart = Math.floor(c.timelineStart * sr)
-      const srcStart = Math.floor(c.sourceStart * sr)
-      const n = Math.floor(c.duration * sr)
-      for (let i = 0; i < n; i++) {
-        const di = dstStart + i
-        const si = srcStart + i
-        if (di >= 0 && di < length && si >= 0 && si < src.length) dst[di] = src[si]
-      }
+): Promise<AudioBuffer | null> {
+  if (!clips.length || totalDuration <= 0) return null
+  const sampleRate = 48000
+  const length = Math.max(1, Math.ceil(totalDuration * sampleRate))
+  const offline = new OfflineAudioContext(2, length, sampleRate)
+  for (const c of clips) {
+    const src = offline.createBufferSource()
+    src.buffer = c.buffer
+    src.connect(offline.destination)
+    try {
+      src.start(c.timelineStart, c.sourceStart, c.duration)
+    } catch {
+      /* clip out of range — skip */
     }
   }
-  return out
+  return offline.startRendering()
 }
 
 /** Format seconds as m:ss (or m:ss.t when an interval needs sub-second labels). */

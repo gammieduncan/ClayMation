@@ -1,18 +1,19 @@
 import { useEffect, useRef } from 'react'
 import type { Frame } from '../types'
-import { type AudioClip, audioTimelineEnd, clipEnd, formatTime } from '../lib/audioTimeline'
+import {
+  type AudioClip,
+  MIN_CLIP_DURATION,
+  audioTimelineEnd,
+  clipEnd,
+  formatTime,
+} from '../lib/audioTimeline'
 
 const RULER_H = 26
 const FRAME_LANE_H = 96
 const AUDIO_LANE_H = 68
 const GUTTER_W = 88
 const TOTAL_H = RULER_H + FRAME_LANE_H + AUDIO_LANE_H
-
-export interface TimelineAudio {
-  name: string
-  buffer: AudioBuffer
-  clips: AudioClip[]
-}
+const EDGE = 8 // trim-handle width in px
 
 interface Props {
   frames: Frame[]
@@ -21,8 +22,9 @@ interface Props {
   zoom: number
   minZoom: number
   maxZoom: number
-  audio: TimelineAudio | null
+  clips: AudioClip[]
   selectedClipId: string | null
+  recording: { analyser: AnalyserNode; startTime: number } | null
   playheadRef: React.RefObject<HTMLDivElement | null>
   onZoom: (z: number) => void
   onScrub: (t: number) => void
@@ -30,7 +32,7 @@ interface Props {
   onDeleteFrame: (index: number) => void
   onReorderFrames: (from: number, to: number) => void
   onSelectClip: (id: string | null) => void
-  onMoveClip: (id: string, timelineStart: number) => void
+  onUpdateClip: (id: string, patch: Partial<AudioClip>) => void
   onSplit: () => void
   onDeleteClip: () => void
   onRemoveAudio: () => void
@@ -49,8 +51,9 @@ export function Timeline({
   zoom,
   minZoom,
   maxZoom,
-  audio,
+  clips,
   selectedClipId,
+  recording,
   playheadRef,
   onZoom,
   onScrub,
@@ -58,7 +61,7 @@ export function Timeline({
   onDeleteFrame,
   onReorderFrames,
   onSelectClip,
-  onMoveClip,
+  onUpdateClip,
   onSplit,
   onDeleteClip,
   onRemoveAudio,
@@ -67,13 +70,15 @@ export function Timeline({
   const dragIndex = useRef<number | null>(null)
   const scrubbing = useRef(false)
 
+  const hasAudio = clips.length > 0
   const framesDuration = frames.length / fps
-  const audioEnd = audio ? audioTimelineEnd(audio.clips) : 0
-  const totalDuration = Math.max(framesDuration, audioEnd, 1)
+  const audioEnd = audioTimelineEnd(clips)
+  const recEnd = recording ? recording.startTime + 0.1 : 0
+  const totalDuration = Math.max(framesDuration, audioEnd, recEnd, 1)
   const contentWidth = Math.max(totalDuration * pxPerSecond, 1)
   const frameWidth = pxPerSecond / fps
 
-  function timeFromEvent(e: React.MouseEvent): number {
+  function timeFromEvent(e: React.PointerEvent | React.MouseEvent): number {
     const el = scrollRef.current
     if (!el) return 0
     const rect = el.getBoundingClientRect()
@@ -81,7 +86,6 @@ export function Timeline({
     return Math.max(0, Math.min(totalDuration, x / pxPerSecond))
   }
 
-  // Ruler ticks
   const interval = tickInterval(pxPerSecond)
   const showTenths = interval < 1
   const ticks: number[] = []
@@ -112,7 +116,7 @@ export function Timeline({
 
         <div className="mx-1 h-5 w-px bg-white/10" />
 
-        {audio ? (
+        {hasAudio ? (
           <>
             <button
               onClick={onSplit}
@@ -125,7 +129,7 @@ export function Timeline({
               onClick={onDeleteClip}
               disabled={!selectedClipId}
               className="rounded-md border border-white/15 bg-white/5 px-2.5 py-1 text-xs text-white/70 hover:bg-white/10 disabled:opacity-40"
-              title="Delete the selected audio segment"
+              title="Delete the selected segment (or press Delete)"
             >
               🗑 Delete part
             </button>
@@ -141,9 +145,7 @@ export function Timeline({
           <span className="text-xs text-white/30">Add audio to edit it on the timeline</span>
         )}
 
-        <span className="ml-auto text-xs tabular-nums text-white/40">
-          {formatTime(totalDuration)} total
-        </span>
+        <span className="ml-auto text-xs tabular-nums text-white/40">{formatTime(totalDuration)} total</span>
       </div>
 
       {/* Tracks */}
@@ -168,7 +170,7 @@ export function Timeline({
         {/* Scrollable timeline content */}
         <div ref={scrollRef} className="relative flex-1 overflow-x-auto">
           <div className="relative" style={{ width: contentWidth, height: TOTAL_H }}>
-            {/* Ruler */}
+            {/* Ruler — drag to scrub */}
             <div
               className="absolute left-0 top-0 cursor-ew-resize select-none border-b border-white/10 bg-neutral-900/40"
               style={{ width: contentWidth, height: RULER_H }}
@@ -212,20 +214,13 @@ export function Timeline({
                     dragIndex.current = null
                   }}
                   onClick={() => onSelectFrame(i)}
-                  className="group relative h-[80px] shrink-0 cursor-pointer overflow-hidden border-r border-black/40 ring-inset hover:ring-2 hover:ring-amber-400/60"
+                  className="group relative h-[80px] shrink-0 cursor-pointer overflow-hidden border-r border-black/40 hover:ring-2 hover:ring-inset hover:ring-amber-400/60"
                   style={{ width: Math.max(2, frameWidth) }}
                   title={`Frame ${i + 1}`}
                 >
-                  <img
-                    src={frame.thumb}
-                    alt={`Frame ${i + 1}`}
-                    className="h-full w-full object-cover"
-                    draggable={false}
-                  />
+                  <img src={frame.thumb} alt={`Frame ${i + 1}`} className="h-full w-full object-cover" draggable={false} />
                   {frameWidth >= 28 && (
-                    <span className="absolute bottom-0 left-0 bg-black/60 px-1 text-[9px] text-white/80">
-                      {i + 1}
-                    </span>
+                    <span className="absolute bottom-0 left-0 bg-black/60 px-1 text-[9px] text-white/80">{i + 1}</span>
                   )}
                   {frameWidth >= 40 && (
                     <button
@@ -252,25 +247,31 @@ export function Timeline({
               className="absolute left-0 border-t border-white/5 bg-black/20"
               style={{ top: RULER_H + FRAME_LANE_H, height: AUDIO_LANE_H, width: contentWidth }}
               onMouseDown={(e) => {
-                // Clicking empty audio space scrubs + clears clip selection.
                 if (e.target === e.currentTarget) {
                   onSelectClip(null)
                   onScrub(timeFromEvent(e))
                 }
               }}
             >
-              {audio?.clips.map((c) => (
+              {clips.map((c) => (
                 <ClipBlock
                   key={c.id}
                   clip={c}
-                  buffer={audio.buffer}
                   pxPerSecond={pxPerSecond}
                   height={AUDIO_LANE_H}
                   selected={c.id === selectedClipId}
                   onSelect={() => onSelectClip(c.id)}
-                  onMove={(start) => onMoveClip(c.id, start)}
+                  onUpdate={(patch) => onUpdateClip(c.id, patch)}
                 />
               ))}
+              {recording && (
+                <RecordingClip
+                  analyser={recording.analyser}
+                  startTime={recording.startTime}
+                  pxPerSecond={pxPerSecond}
+                  height={AUDIO_LANE_H}
+                />
+              )}
             </div>
 
             {/* Playhead (positioned imperatively by Studio's render loop) */}
@@ -288,36 +289,40 @@ export function Timeline({
   )
 }
 
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, v))
+}
+
 interface ClipBlockProps {
   clip: AudioClip
-  buffer: AudioBuffer
   pxPerSecond: number
   height: number
   selected: boolean
   onSelect: () => void
-  onMove: (timelineStart: number) => void
+  onUpdate: (patch: Partial<AudioClip>) => void
 }
 
-function ClipBlock({ clip, buffer, pxPerSecond, height, selected, onSelect, onMove }: ClipBlockProps) {
+function ClipBlock({ clip, pxPerSecond, height, selected, onSelect, onUpdate }: ClipBlockProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const drag = useRef<{ startX: number; origStart: number } | null>(null)
+  const interaction = useRef<{ type: 'move' | 'left' | 'right'; startX: number; origin: AudioClip } | null>(null)
   const width = Math.max(2, clip.duration * pxPerSecond)
+  const bufDur = clip.buffer.duration
 
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
+    const c = canvas.getContext('2d')
+    if (!c) return
     const dpr = window.devicePixelRatio || 1
     const cssW = canvas.clientWidth
     const cssH = canvas.clientHeight
     canvas.width = Math.max(1, Math.floor(cssW * dpr))
     canvas.height = Math.max(1, Math.floor(cssH * dpr))
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    ctx.clearRect(0, 0, cssW, cssH)
+    c.setTransform(dpr, 0, 0, dpr, 0, 0)
+    c.clearRect(0, 0, cssW, cssH)
 
-    const data = buffer.getChannelData(0)
-    const sr = buffer.sampleRate
+    const data = clip.buffer.getChannelData(0)
+    const sr = clip.buffer.sampleRate
     const startSample = Math.floor(clip.sourceStart * sr)
     const sampleCount = Math.floor(clip.duration * sr)
     const mid = cssH / 2
@@ -326,7 +331,7 @@ function ClipBlock({ clip, buffer, pxPerSecond, height, selected, onSelect, onMo
     const bars = Math.max(1, Math.floor(cssW / (barW + gap)))
     const step = Math.max(1, Math.floor(sampleCount / bars))
 
-    ctx.fillStyle = selected ? '#fde68a' : '#f59e0b'
+    c.fillStyle = selected ? '#fde68a' : '#f59e0b'
     for (let b = 0; b < bars; b++) {
       let peak = 0
       const base = startSample + b * step
@@ -335,9 +340,42 @@ function ClipBlock({ clip, buffer, pxPerSecond, height, selected, onSelect, onMo
         if (v > peak) peak = v
       }
       const h = Math.max(1, peak * (cssH - 6))
-      ctx.fillRect(b * (barW + gap), mid - h / 2, barW, h)
+      c.fillRect(b * (barW + gap), mid - h / 2, barW, h)
     }
-  }, [buffer, clip.sourceStart, clip.duration, pxPerSecond, selected])
+  }, [clip.buffer, clip.sourceStart, clip.duration, pxPerSecond, selected])
+
+  function begin(type: 'move' | 'left' | 'right', e: React.PointerEvent) {
+    e.stopPropagation()
+    onSelect()
+    ;(e.currentTarget as Element).setPointerCapture(e.pointerId)
+    interaction.current = { type, startX: e.clientX, origin: { ...clip } }
+  }
+
+  function move(e: React.PointerEvent) {
+    const it = interaction.current
+    if (!it) return
+    const dt = (e.clientX - it.startX) / pxPerSecond
+    const o = it.origin
+    if (it.type === 'move') {
+      onUpdate({ timelineStart: Math.max(0, o.timelineStart + dt) })
+    } else if (it.type === 'right') {
+      const nd = clamp(o.duration + dt, MIN_CLIP_DURATION, bufDur - o.sourceStart)
+      onUpdate({ duration: nd })
+    } else {
+      let ns = clamp(o.sourceStart + dt, 0, o.sourceStart + o.duration - MIN_CLIP_DURATION)
+      let delta = ns - o.sourceStart
+      if (o.timelineStart + delta < 0) {
+        delta = -o.timelineStart
+        ns = o.sourceStart + delta
+      }
+      onUpdate({ sourceStart: ns, timelineStart: o.timelineStart + delta, duration: o.duration - delta })
+    }
+  }
+
+  function end(e: React.PointerEvent) {
+    interaction.current = null
+    ;(e.currentTarget as Element).releasePointerCapture?.(e.pointerId)
+  }
 
   return (
     <div
@@ -345,25 +383,98 @@ function ClipBlock({ clip, buffer, pxPerSecond, height, selected, onSelect, onMo
         selected ? 'ring-2 ring-amber-300' : 'ring-1 ring-white/15'
       }`}
       style={{ left: clip.timelineStart * pxPerSecond, width, height: height - 8 }}
-      onPointerDown={(e) => {
-        e.stopPropagation()
-        onSelect()
-        e.currentTarget.setPointerCapture(e.pointerId)
-        drag.current = { startX: e.clientX, origStart: clip.timelineStart }
-      }}
-      onPointerMove={(e) => {
-        if (!drag.current) return
-        const dt = (e.clientX - drag.current.startX) / pxPerSecond
-        onMove(Math.max(0, drag.current.origStart + dt))
-      }}
-      onPointerUp={(e) => {
-        drag.current = null
-        e.currentTarget.releasePointerCapture(e.pointerId)
-      }}
+      onPointerDown={(e) => begin('move', e)}
+      onPointerMove={move}
+      onPointerUp={end}
       title={`${formatTime(clip.timelineStart)} – ${formatTime(clipEnd(clip))}`}
     >
       <div className={`absolute inset-0 ${selected ? 'bg-amber-400/20' : 'bg-amber-400/10'}`} />
       <canvas ref={canvasRef} className="relative h-full w-full" />
+
+      {/* Trim handles */}
+      <div
+        className="absolute inset-y-0 left-0 cursor-ew-resize touch-none bg-amber-300/40 hover:bg-amber-300/70"
+        style={{ width: EDGE }}
+        onPointerDown={(e) => begin('left', e)}
+        onPointerMove={move}
+        onPointerUp={end}
+      />
+      <div
+        className="absolute inset-y-0 right-0 cursor-ew-resize touch-none bg-amber-300/40 hover:bg-amber-300/70"
+        style={{ width: EDGE }}
+        onPointerDown={(e) => begin('right', e)}
+        onPointerMove={move}
+        onPointerUp={end}
+      />
+    </div>
+  )
+}
+
+interface RecordingClipProps {
+  analyser: AnalyserNode
+  startTime: number
+  pxPerSecond: number
+  height: number
+}
+
+function RecordingClip({ analyser, startTime, pxPerSecond, height }: RecordingClipProps) {
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const peaks = useRef<number[]>([])
+
+  useEffect(() => {
+    peaks.current = []
+    const startPerf = performance.now()
+    const data = new Float32Array(analyser.fftSize)
+    let raf = 0
+    const tick = () => {
+      analyser.getFloatTimeDomainData(data)
+      let p = 0
+      for (let i = 0; i < data.length; i++) {
+        const v = Math.abs(data[i])
+        if (v > p) p = v
+      }
+      peaks.current.push(p)
+
+      const elapsed = (performance.now() - startPerf) / 1000
+      const w = Math.max(2, elapsed * pxPerSecond)
+      const cssH = height - 8
+      if (wrapRef.current) wrapRef.current.style.width = `${w}px`
+      const canvas = canvasRef.current
+      if (canvas) {
+        const dpr = window.devicePixelRatio || 1
+        canvas.width = Math.max(1, Math.floor(w * dpr))
+        canvas.height = Math.max(1, Math.floor(cssH * dpr))
+        const c = canvas.getContext('2d')
+        if (c) {
+          c.setTransform(dpr, 0, 0, dpr, 0, 0)
+          c.clearRect(0, 0, w, cssH)
+          c.fillStyle = '#f87171' // red-400
+          const mid = cssH / 2
+          const n = peaks.current.length
+          const barW = 2
+          const gap = 1
+          const bars = Math.max(1, Math.floor(w / (barW + gap)))
+          for (let b = 0; b < bars; b++) {
+            const pk = peaks.current[Math.floor((b / bars) * n)] || 0
+            const h = Math.max(1, pk * (cssH - 4))
+            c.fillRect(b * (barW + gap), mid - h / 2, barW, h)
+          }
+        }
+      }
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [analyser, pxPerSecond, height])
+
+  return (
+    <div
+      ref={wrapRef}
+      className="absolute top-1 overflow-hidden rounded-md bg-red-500/10 ring-2 ring-red-400/70"
+      style={{ left: startTime * pxPerSecond, height: height - 8 }}
+    >
+      <canvas ref={canvasRef} className="h-full w-full" />
     </div>
   )
 }

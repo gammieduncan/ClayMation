@@ -5,7 +5,8 @@ import {
   type AudioClip,
   audioTimelineEnd,
   formatTime,
-  renderTimelineToBuffer,
+  makeClip,
+  renderTimeline,
   splitClipsAtTime,
 } from '../lib/audioTimeline'
 import type { Frame } from '../types'
@@ -18,21 +19,10 @@ interface Dims {
   h: number
 }
 
-interface AudioState {
-  name: string
-  buffer: AudioBuffer
-  source: 'import' | 'record'
-  clips: AudioClip[]
-}
-
 const ONION_MAX = 5
 const FRAME_CONTENT_H = 80 // matches the frames-lane thumbnail height in Timeline
 const MIN_ZOOM = 0.1
 const MAX_ZOOM = 4
-
-function makeInitialClips(buffer: AudioBuffer): AudioClip[] {
-  return [{ id: crypto.randomUUID(), timelineStart: 0, sourceStart: 0, duration: buffer.duration }]
-}
 
 export function Studio() {
   const { devices, deviceId, setDeviceId, stream, error } = useWebcam()
@@ -47,11 +37,13 @@ export function Studio() {
   const [zoom, setZoom] = useState(1)
   const [isExporting, setIsExporting] = useState(false)
   const [exportPct, setExportPct] = useState(0)
-  const [audio, setAudio] = useState<AudioState | null>(null)
+  const [clips, setClips] = useState<AudioClip[]>([])
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null)
   const [audioMenuOpen, setAudioMenuOpen] = useState(false)
   const [isRecording, setIsRecording] = useState(false)
   const [recordSeconds, setRecordSeconds] = useState(0)
+  const [analyser, setAnalyser] = useState<AnalyserNode | null>(null)
+  const [recordStartTime, setRecordStartTime] = useState(0)
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -64,6 +56,8 @@ export function Studio() {
   const recordChunksRef = useRef<Blob[]>([])
   const recordStreamRef = useRef<MediaStream | null>(null)
   const recordTimerRef = useRef<number | null>(null)
+  const micNodeRef = useRef<MediaStreamAudioSourceNode | null>(null)
+  const recordStartRef = useRef(0)
   const playStartRef = useRef({ perf: 0, t0: 0 })
   const playTimeRef = useRef(0) // authoritative playhead time for the render loop
   const endPlaybackRef = useRef<() => void>(() => {})
@@ -72,7 +66,7 @@ export function Studio() {
   const aspect = dims.w / dims.h
   const pxPerSecond = FRAME_CONTENT_H * aspect * fps * zoom
   const framesDuration = frames.length / fps
-  const audioEnd = audio ? audioTimelineEnd(audio.clips) : 0
+  const audioEnd = audioTimelineEnd(clips)
   const totalDuration = Math.max(framesDuration, audioEnd, 1)
 
   // Mirror reactive state into a ref so the rAF loop always reads fresh values.
@@ -87,6 +81,10 @@ export function Studio() {
     totalDuration,
   })
   stateRef.current = { frames, fps, onionEnabled, onionCount, mode, dims, pxPerSecond, totalDuration }
+
+  function ctx(): AudioContext {
+    return (audioCtxRef.current ??= new AudioContext())
+  }
 
   // Attach the camera stream to the (hidden) video element.
   useEffect(() => {
@@ -103,9 +101,8 @@ export function Studio() {
       const s = stateRef.current
       const canvas = canvasRef.current
       const video = videoRef.current
-      const ctx = canvas?.getContext('2d')
+      const c2d = canvas?.getContext('2d')
 
-      // Resolve current time on the timeline.
       let t = playTimeRef.current
       if (s.mode === 'play') {
         t = playStartRef.current.t0 + (ts - playStartRef.current.perf) / 1000
@@ -116,35 +113,34 @@ export function Studio() {
         playTimeRef.current = t
       }
 
-      // Move the playhead element imperatively (cheap, no React re-render).
       if (playheadRef.current) playheadRef.current.style.left = `${t * s.pxPerSecond}px`
 
-      if (canvas && ctx) {
+      if (canvas && c2d) {
         const { w, h } = s.dims
         if (canvas.width !== w || canvas.height !== h) {
           canvas.width = w
           canvas.height = h
         }
-        ctx.globalAlpha = 1
+        c2d.globalAlpha = 1
 
         if (s.mode === 'live') {
-          if (video && video.readyState >= 2) ctx.drawImage(video, 0, 0, w, h)
+          if (video && video.readyState >= 2) c2d.drawImage(video, 0, 0, w, h)
           if (s.onionEnabled && s.frames.length > 0) {
             let alpha = 0.5
             const start = s.frames.length - 1
             const end = Math.max(0, s.frames.length - s.onionCount)
             for (let k = start; k >= end; k--) {
-              ctx.globalAlpha = alpha
-              ctx.drawImage(s.frames[k].bitmap, 0, 0, w, h)
+              c2d.globalAlpha = alpha
+              c2d.drawImage(s.frames[k].bitmap, 0, 0, w, h)
               alpha *= 0.5
             }
-            ctx.globalAlpha = 1
+            c2d.globalAlpha = 1
           }
         } else if (s.frames.length > 0) {
           const idx = Math.min(s.frames.length - 1, Math.max(0, Math.floor(t * s.fps)))
-          ctx.drawImage(s.frames[idx].bitmap, 0, 0, w, h)
+          c2d.drawImage(s.frames[idx].bitmap, 0, 0, w, h)
         } else {
-          ctx.clearRect(0, 0, w, h)
+          c2d.clearRect(0, 0, w, h)
         }
       }
       raf = requestAnimationFrame(draw)
@@ -167,13 +163,13 @@ export function Studio() {
   }
 
   function scheduleAudio(startT: number) {
-    if (!audio) return
-    const ctx = (audioCtxRef.current ??= new AudioContext())
-    ctx.resume().catch(() => {})
+    if (!clips.length) return
+    const audioCtx = ctx()
+    audioCtx.resume().catch(() => {})
     stopScheduledAudio()
-    const base = ctx.currentTime + 0.05
+    const base = audioCtx.currentTime + 0.05
     const sources: AudioBufferSourceNode[] = []
-    for (const c of audio.clips) {
+    for (const c of clips) {
       const rel = c.timelineStart - startT
       let offset = c.sourceStart
       let dur = c.duration
@@ -183,9 +179,9 @@ export function Studio() {
         offset += into
         dur -= into
       }
-      const src = ctx.createBufferSource()
-      src.buffer = audio.buffer
-      src.connect(ctx.destination)
+      const src = audioCtx.createBufferSource()
+      src.buffer = c.buffer
+      src.connect(audioCtx.destination)
       src.start(base + Math.max(0, rel), offset, dur)
       sources.push(src)
     }
@@ -193,25 +189,23 @@ export function Studio() {
   }
 
   useEffect(() => {
-    if (mode !== 'play' || !audio) {
+    if (mode !== 'play' || !clips.length) {
       stopScheduledAudio()
       return
     }
     scheduleAudio(playTimeRef.current)
     return stopScheduledAudio
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, audio])
+  }, [mode, clips])
 
-  // --- Audio import / record ---
+  // --- Audio import / record (both append a clip at the playhead) ---
   async function handleAudioFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     e.target.value = ''
     if (!file) return
     try {
-      const ctx = (audioCtxRef.current ??= new AudioContext())
-      const buffer = await ctx.decodeAudioData(await file.arrayBuffer())
-      setAudio({ name: file.name, buffer, source: 'import', clips: makeInitialClips(buffer) })
-      setSelectedClipId(null)
+      const buffer = await ctx().decodeAudioData(await file.arrayBuffer())
+      setClips((prev) => [...prev, makeClip(buffer, playTimeRef.current)])
     } catch {
       alert('Could not read that audio file. Try an MP3, WAV, or M4A.')
     }
@@ -222,20 +216,36 @@ export function Studio() {
     try {
       const micStream = await navigator.mediaDevices.getUserMedia({ audio: true })
       recordStreamRef.current = micStream
+      const audioCtx = ctx()
+      audioCtx.resume().catch(() => {})
+
+      // Live level metering for the growing waveform (not routed to output).
+      const micNode = audioCtx.createMediaStreamSource(micStream)
+      const an = audioCtx.createAnalyser()
+      an.fftSize = 1024
+      micNode.connect(an)
+      micNodeRef.current = micNode
+      setAnalyser(an)
+
+      const startTime = playTimeRef.current
+      recordStartRef.current = startTime
+      setRecordStartTime(startTime)
+
       recordChunksRef.current = []
       const recorder = new MediaRecorder(micStream)
       recorder.ondataavailable = (e) => {
         if (e.data.size > 0) recordChunksRef.current.push(e.data)
       }
       recorder.onstop = async () => {
+        micNodeRef.current?.disconnect()
+        micNodeRef.current = null
+        setAnalyser(null)
         recordStreamRef.current?.getTracks().forEach((t) => t.stop())
         recordStreamRef.current = null
         const blob = new Blob(recordChunksRef.current, { type: recorder.mimeType })
         try {
-          const ctx = (audioCtxRef.current ??= new AudioContext())
-          const buffer = await ctx.decodeAudioData(await blob.arrayBuffer())
-          setAudio({ name: 'Recording', buffer, source: 'record', clips: makeInitialClips(buffer) })
-          setSelectedClipId(null)
+          const buffer = await audioCtx.decodeAudioData(await blob.arrayBuffer())
+          setClips((prev) => [...prev, makeClip(buffer, recordStartRef.current)])
         } catch {
           alert('Could not decode the recording.')
         }
@@ -260,30 +270,25 @@ export function Studio() {
     }
   }
 
+  // --- Clip editing ---
   function removeAudio() {
     stopScheduledAudio()
-    setAudio(null)
+    setClips([])
     setSelectedClipId(null)
   }
 
   function splitAudioAtPlayhead() {
-    setAudio((a) => (a ? { ...a, clips: splitClipsAtTime(a.clips, playTimeRef.current) } : a))
+    setClips((prev) => splitClipsAtTime(prev, playTimeRef.current))
   }
 
   function deleteSelectedClip() {
     if (!selectedClipId) return
-    setAudio((a) => {
-      if (!a) return a
-      const clips = a.clips.filter((c) => c.id !== selectedClipId)
-      return clips.length ? { ...a, clips } : null
-    })
+    setClips((prev) => prev.filter((c) => c.id !== selectedClipId))
     setSelectedClipId(null)
   }
 
-  function moveClip(id: string, newStart: number) {
-    setAudio((a) =>
-      a ? { ...a, clips: a.clips.map((c) => (c.id === id ? { ...c, timelineStart: newStart } : c)) } : a,
-    )
+  function updateClip(id: string, patch: Partial<AudioClip>) {
+    setClips((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)))
   }
 
   // Delete/Backspace removes the selected audio clip (unless typing in a field).
@@ -349,7 +354,7 @@ export function Studio() {
       endPlayback()
       return
     }
-    if (frames.length === 0 && !audio) return
+    if (frames.length === 0 && clips.length === 0) return
     let startT = playTimeRef.current
     if (startT >= totalDuration - 1e-3) startT = 0
     playTimeRef.current = startT
@@ -394,9 +399,8 @@ export function Studio() {
     setExportPct(0)
     try {
       let exportAudio: AudioBuffer | null = null
-      if (audio && canExportAudio()) {
-        const ctx = (audioCtxRef.current ??= new AudioContext())
-        exportAudio = renderTimelineToBuffer(ctx, audio.buffer, audio.clips, framesDuration)
+      if (clips.length && canExportAudio()) {
+        exportAudio = await renderTimeline(clips, framesDuration)
       }
       const blob = await exportMp4({
         frames,
@@ -421,6 +425,7 @@ export function Studio() {
   }
 
   const exportSupported = canExportMp4()
+  const hasAudio = clips.length > 0
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
@@ -487,7 +492,7 @@ export function Studio() {
 
           <button
             onClick={togglePlay}
-            disabled={frames.length === 0 && !audio}
+            disabled={frames.length === 0 && clips.length === 0}
             className="rounded-xl border border-white/15 bg-white/5 px-4 py-2.5 font-medium transition hover:bg-white/10 disabled:opacity-40"
           >
             {mode === 'play' ? '■ Stop' : '▶ Play'}
@@ -582,7 +587,7 @@ export function Studio() {
         <div className="text-xs text-white/40">
           {frames.length} frame{frames.length === 1 ? '' : 's'} · {framesDuration.toFixed(1)}s at {fps} fps
           {!exportSupported && <span className="ml-2 text-amber-300/70">(MP4 export needs Chrome/Edge or Safari 16.4+)</span>}
-          {audio && exportSupported && !canExportAudio() && (
+          {hasAudio && exportSupported && !canExportAudio() && (
             <span className="ml-2 text-amber-300/70">(audio plays here but can't be baked into the MP4 in this browser)</span>
           )}
         </div>
@@ -595,8 +600,9 @@ export function Studio() {
         zoom={zoom}
         minZoom={MIN_ZOOM}
         maxZoom={MAX_ZOOM}
-        audio={audio}
+        clips={clips}
         selectedClipId={selectedClipId}
+        recording={analyser ? { analyser, startTime: recordStartTime } : null}
         playheadRef={playheadRef}
         onZoom={setZoom}
         onScrub={scrub}
@@ -604,7 +610,7 @@ export function Studio() {
         onDeleteFrame={deleteFrame}
         onReorderFrames={reorderFrames}
         onSelectClip={setSelectedClipId}
-        onMoveClip={moveClip}
+        onUpdateClip={updateClip}
         onSplit={splitAudioAtPlayhead}
         onDeleteClip={deleteSelectedClip}
         onRemoveAudio={removeAudio}
