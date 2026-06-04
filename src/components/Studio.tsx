@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useWebcam } from '../hooks/useWebcam'
-import { canExportMp4, exportMp4 } from '../lib/exportMp4'
+import { canExportAudio, canExportMp4, exportMp4 } from '../lib/exportMp4'
 import type { Frame } from '../types'
 import { Filmstrip } from './Filmstrip'
 
@@ -25,9 +25,13 @@ export function Studio() {
   const [dims, setDims] = useState<Dims>({ w: 1280, h: 720 })
   const [isExporting, setIsExporting] = useState(false)
   const [exportPct, setExportPct] = useState(0)
+  const [audio, setAudio] = useState<{ name: string; buffer: AudioBuffer } | null>(null)
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const audioInputRef = useRef<HTMLInputElement>(null)
+  const audioCtxRef = useRef<AudioContext | null>(null)
+  const audioSourceRef = useRef<AudioBufferSourceNode | null>(null)
   const playRef = useRef({ index: 0, last: 0 })
 
   // Mirror reactive state into a ref so the rAF loop always reads fresh values.
@@ -92,6 +96,54 @@ export function Studio() {
     raf = requestAnimationFrame(draw)
     return () => cancelAnimationFrame(raf)
   }, [])
+
+  function stopAudio() {
+    if (audioSourceRef.current) {
+      try {
+        audioSourceRef.current.stop()
+      } catch {
+        /* already stopped */
+      }
+      audioSourceRef.current.disconnect()
+      audioSourceRef.current = null
+    }
+  }
+
+  // Play the music alongside in-page playback; stop it otherwise.
+  useEffect(() => {
+    if (mode !== 'play' || !audio) {
+      stopAudio()
+      return
+    }
+    const ctx = (audioCtxRef.current ??= new AudioContext())
+    ctx.resume().catch(() => {})
+    stopAudio()
+    const src = ctx.createBufferSource()
+    src.buffer = audio.buffer
+    src.loop = true
+    src.connect(ctx.destination)
+    src.start()
+    audioSourceRef.current = src
+    return stopAudio
+  }, [mode, audio])
+
+  async function handleAudioFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    e.target.value = '' // allow re-selecting the same file later
+    if (!file) return
+    try {
+      const ctx = (audioCtxRef.current ??= new AudioContext())
+      const buffer = await ctx.decodeAudioData(await file.arrayBuffer())
+      setAudio({ name: file.name, buffer })
+    } catch {
+      alert('Could not read that audio file. Try an MP3, WAV, or M4A.')
+    }
+  }
+
+  function removeAudio() {
+    stopAudio()
+    setAudio(null)
+  }
 
   function handleLoadedMetadata() {
     const v = videoRef.current
@@ -171,7 +223,14 @@ export function Studio() {
     setIsExporting(true)
     setExportPct(0)
     try {
-      const blob = await exportMp4(frames, fps, dims.w, dims.h, (d, t) => setExportPct(d / t))
+      const blob = await exportMp4({
+        frames,
+        fps,
+        width: dims.w,
+        height: dims.h,
+        audio: audio?.buffer ?? null,
+        onProgress: (d, t) => setExportPct(d / t),
+      })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
@@ -298,6 +357,30 @@ export function Studio() {
             />
           )}
 
+          {audio ? (
+            <div className="flex items-center gap-2 rounded-xl border border-white/15 bg-white/5 px-3 py-2 text-sm">
+              <span className="text-white/40">♪</span>
+              <span className="max-w-[140px] truncate text-white/80" title={audio.name}>
+                {audio.name}
+              </span>
+              <button
+                onClick={removeAudio}
+                className="text-white/40 hover:text-red-400"
+                aria-label="Remove music"
+              >
+                ×
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => audioInputRef.current?.click()}
+              className="rounded-xl border border-white/15 bg-white/5 px-4 py-2.5 font-medium text-white/70 transition hover:bg-white/10"
+              title="Add a music track to play during preview and bake into the export"
+            >
+              ♪ Add music
+            </button>
+          )}
+
           <div className="mx-1 h-6 w-px bg-white/10" />
 
           <button
@@ -313,6 +396,9 @@ export function Studio() {
         <div className="text-xs text-white/40">
           {frames.length} frame{frames.length === 1 ? '' : 's'} · {durationSec.toFixed(1)}s at {fps} fps
           {!exportSupported && <span className="ml-2 text-amber-300/70">(MP4 export needs Chrome/Edge or Safari 16.4+)</span>}
+          {audio && exportSupported && !canExportAudio() && (
+            <span className="ml-2 text-amber-300/70">(music plays here but can't be baked into the MP4 in this browser)</span>
+          )}
         </div>
       </main>
 
@@ -322,6 +408,14 @@ export function Studio() {
         onSelect={selectFrame}
         onDelete={deleteFrame}
         onReorder={reorderFrames}
+      />
+
+      <input
+        ref={audioInputRef}
+        type="file"
+        accept="audio/*"
+        onChange={handleAudioFile}
+        className="hidden"
       />
 
       {/* Hidden source video — drawn into the canvas every frame. */}
