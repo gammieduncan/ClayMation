@@ -10,7 +10,7 @@ This is a from-scratch web rewrite of the original Java/Swing desktop app
 tag) — the browser turns out to be the perfect home for it: native webcam
 access, GPU-accelerated canvas compositing, and in-page H.264 encoding.
 
-**[▶ Live demo](https://gammieduncan.github.io/claymation-web/)**
+**[▶ Live demo](https://gammieduncan.github.io/ClayMation/)**
 
 ## Features
 
